@@ -1,0 +1,250 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Lambda function for unuser workspaces
+
+#“The sample code; software libraries; command line tools; proofs of concept; templates; or other related technology (including any of the foregoing that are provided by our personnel) is provided to you as AWS Content under the AWS Customer Agreement, or the relevant written agreement between you and AWS (whichever applies). You should not use this AWS Content in your production accounts, or on production or other critical data. You are responsible for testing, securing, and optimizing the AWS Content, such as sample code, as appropriate for production grade use based on your specific quality control practices and standards. Deploying AWS Content may incur AWS charges for creating or using AWS chargeable resources, such as running Amazon EC2 instances or using Amazon S3 storage.”.
+
+Parameters:
+  Days:
+    Type: Number
+    Default: 30
+    MinValue: 7
+    MaxValue: 365
+    ConstraintDescription: Set a number of days to report unused WorkSpaces. Values between 7 and 90.
+    Description: After how many days unused WorkSpaces will be reported?
+  ExecutionRate:
+    Type: Number
+    Default: 7
+    MinValue: 3
+    MaxValue: 30
+    ConstraintDescription: Set the number of days to run this solution. Values between 3 and 30.
+    Description: every how many days do you want to run this solution?
+  EmailAddress:
+    ConstraintDescription: Set a valid Email address
+    Description: Set an Email address to receive a report of the unused WorkSpaces
+    AllowedPattern: "^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\\.[a-zA-Z0-9-.]+$"
+    Type: String
+
+Outputs:
+  LambdaRoleARN:
+    Description: Role for Lambda execution.
+    Value:
+      Fn::GetAtt:
+        - LambdaRole
+        - Arn
+  LambdaFunctionName:
+    Value:
+      Ref: LambdaFunction
+  LambdaFunctionARN:
+    Description: Lambda function ARN.
+    Value:
+      Fn::GetAtt:
+        - LambdaFunction
+        - Arn
+  MyTopicArn:
+    Description: Arn of Created SNS Topic
+    Value:
+      Ref: MySNSTopic
+
+Resources:
+# Lambda role
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: UnusedWorkspacesPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Sid: DescribeWorkspaces
+            Effect: Allow
+            Action:
+            - workspaces:DescribeWorkspacesConnectionStatus
+            - workspaces:DescribeWorkspaceDirectories
+            Resource: 
+            - !Sub arn:aws:workspaces:${AWS::Region}:${AWS::AccountId}:workspace/*
+          - Sid: SendEmail
+            Effect: Allow
+            Action:
+            - sns:Publish
+            Resource: !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:UnusedWorkspacesTopic-${AWS::AccountId}"
+          - Sid: Logs
+            Effect: Allow
+            Action:
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource:
+            - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/UnusedWorkspaces-${AWS::AccountId}:*
+          - Sid: S3
+            Effect: Allow
+            Action:
+            - s3:PutObject
+            - s3:PutObjectAcl
+            Resource:
+            - !Sub arn:aws:s3:::unusedworkspaces-${AWS::AccountId}/*
+# Lambda function
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.9
+      Environment:
+        Variables:
+          Days:
+            Ref: Days
+          SNSTopic: !Sub "arn:aws:sns:${AWS::Region}:${AWS::AccountId}:UnusedWorkspacesTopic-${AWS::AccountId}"
+          BucketName:  !Sub "unusedworkspaces-${AWS::AccountId}"
+
+      Role:
+        Fn::GetAtt:
+        - LambdaRole
+        - Arn
+      FunctionName: !Sub "UnusedWorkspaces-${AWS::AccountId}"
+      Handler: index.lambda_handler
+      MemorySize: 168
+      Timeout: 35
+      Code:
+        ZipFile: |
+          import boto3
+          import datetime
+          import os
+          import csv
+
+          ## Import clientes
+          ws_client       = boto3.client('workspaces')
+          sns 			= boto3.client("sns")
+          s3              = boto3.client('s3')
+          ## Get Env variables
+          unusedDays 	  	= os.environ['Days']
+          SNSTopic 	    = os.environ['SNSTopic']
+          BUCKET_NAME     = os.environ['BucketName']
+          ## Initialize variables
+          ws_data 		= {}
+          ws_data_unused	= {}
+          ct 				= datetime.datetime.now()
+
+          def send_email(report,report_unused,unusedDays):
+              email_subject	= "Report: Unused Amazon Workspaces"
+              email_footer 	= "Information obtained with API WorkspaceConnectionStatus.\nAmazon workspaces with unknown usage, have not been used since implementation.\n\nRegards,\nAmazon"
+              email_data      = "Amazon Workspaces unused for "+unusedDays+" days or more.\n\n"+report+"\n\nAmazon Workspaces with unknown last usage\n\n"+report_unused+"\n\n"+email_footer
+              sns_response    = sns.publish(TopicArn=SNSTopic,Message=email_data,Subject=email_subject)
+              
+              
+          def create_csv(ws_data_sorted,ws_data_unused):
+              
+              f               = open("/tmp/csv_file.csv", "w+")
+              temp_csv_file   = csv.writer(f)
+              temp_csv_file.writerow(["WorkspaceId", "Days Unused"])
+              
+              for k, v in ws_data_sorted.items():
+                  temp_csv_file.writerow([k, str(v)])
+
+              for k, v in ws_data_unused.items():
+                  temp_csv_file.writerow([k, "not used"])
+              f.close()
+
+              s3.upload_file('/tmp/csv_file.csv', BUCKET_NAME,'unused_workspaces_report_'+ct.strftime("%b-%d-%Y")+'.csv')
+
+          def lambda_handler(event, context):
+              ws_response   	= ws_client.describe_workspaces_connection_status()
+              ws_details 		= ws_response['WorkspacesConnectionStatus']
+              report_unused   = ""
+              report 			= "WorkspaceId: Days unused\n\n"
+              
+              # Manage pagination
+              while "NextToken" in ws_response:
+                  ws_response = ws_client.describe_workspaces_connection_status(NextToken=ws_response["NextToken"])
+                  ws_details.extend(ws_response['WorkspacesConnectionStatus'])
+
+              for ws_response_workspaces in ws_details:
+                  try:
+                      diff = ct - ws_response_workspaces['LastKnownUserConnectionTimestamp'].replace(tzinfo=None)
+                      if diff.days >= int(unusedDays):
+                          ws_data[ws_response_workspaces['WorkspaceId']]=diff.days
+                  except KeyError:
+                      ws_data_unused[ws_response_workspaces['WorkspaceId']]=-1
+
+              ws_data_sorted={k: v for k, v in sorted(ws_data.items(), key=lambda item: item[1])}
+              
+              for k, v in ws_data_sorted.items():
+                  report+=k+":  "+str(v)+"\n"
+              
+              for k, v in ws_data_unused.items():
+                  report_unused+=k+"\n"
+
+              send_email(report,report_unused,unusedDays)
+              
+              create_csv(ws_data_sorted,ws_data_unused)
+
+
+      Description: Invoke a function during stack creation.
+      TracingConfig:
+        Mode: Active
+# SNS Topic
+  MySNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "UnusedWorkspacesTopic-${AWS::AccountId}"
+      DisplayName: Topic to report unused Workspaces
+      Subscription:
+      - Endpoint:
+          Ref: EmailAddress
+        Protocol: email
+      - Endpoint: !GetAtt LambdaFunction.Arn
+        Protocol: lambda
+# Log Group
+  MyLambdaFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:
+        Fn::Join:
+        - ''
+        - - "/aws/lambda/"
+          - Ref: LambdaFunction
+
+# S3
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub unusedworkspaces-${AWS::AccountId}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      
+
+# Event
+  UnusedWorkspacesRule:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: !Sub "rate(${ExecutionRate} days)"
+      Targets:
+      - Id: LambdaFunction
+        Arn:
+          Fn::GetAtt:
+          - LambdaFunction
+          - Arn
+  InvokeLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Fn::GetAtt:
+        - LambdaFunction
+        - Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn:
+        Fn::GetAtt:
+        - UnusedWorkspacesRule
+        - Arn
