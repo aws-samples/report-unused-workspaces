@@ -13,15 +13,19 @@ Report Unused Workspaces is a sample code for blog "How to detect Unused Amazon 
 3) The Lambda logs will be saved in Amazon CloudWatch logs
 4) The report will be uploaded in CSV format into a Amazon S3 bucket and sent by email using Amazon Simple Notification Service (SNS)
 
-## Installation
+## Deploy
 
-1) Upload the unused-workspaces-report.yaml into AWS Cloudformation
-2) Configure the following parametes
-    - Days: Set a number of days to report unused WorkSpaces.    
+Deploy the Report Unused Workspaces solution to your account by launching a new AWS CloudFormation stack using the file unused-workspaces-report.yaml.
+
+1) On the AWS account where Amazon Workspaces is being used go to AWS Cloudformation Service
+2) Select Create Stack > With new resources (standard) and then select "Upload a template file"
+3) Click Choose file and upload the unused-workspaces-report.yaml into AWS Cloudformation
+4) Set an stack name and configure the following parametes
     - EmailAddress: Set one Email address to receive a report of the unused WorkSpaces
-    - ExecutionRate: every how many days do you want to run this solution?
-3) Confirm the SNS Subscription Confirmation
-4) The results will be received in the configured email address and saved in a Bucket named unusedworkspaces-\<AWS Account Number\>
+    - ExecutionRate: Every how many days do you want to run this solution? (between 3 and 30)
+    - Days: Set a number of days to report unused WorkSpaces (between 7 and 90).
+5) Confirm the SNS Subscription Confirmation
+6) The results will be received in the configured email address and saved in a Bucket named unusedworkspaces-\<AWS Account Number\>
 
 ## Security
 
