@@ -2,11 +2,6 @@
 
 AWSTemplateFormatVersion: '2010-09-09'
 Description: |
-  CloudFormation template that creates a Lambda function that sends a report of
-  unused workspaces to an SNS topic.
-
-AWSTemplateFormatVersion: '2010-09-09'
-Description: |
   This Cloudformation template will deploy a Event Bridge Scheduled event that will trigger a 
   Lambda function to detect unused Workspaces using the DescribeWorkspacesConnectionStatus API.
 
