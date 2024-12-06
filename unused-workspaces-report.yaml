@@ -101,7 +101,7 @@ Resources:
     Type: AWS::Lambda::Function
     Properties:
       Description: "Lambda function that sends a report of unused workspaces to an SNS topic."
-      Runtime: python3.9
+      Runtime: python3.12
       Environment:
         Variables:
           UNUSED_DAYS:
@@ -115,7 +115,7 @@ Resources:
         - Arn
       FunctionName: !Sub "UnusedWorkspaces-${AWS::AccountId}"
       Handler: index.lambda_handler
-      MemorySize: 168
+      MemorySize: 256
       Timeout: 35
       Code:
         ZipFile: |
@@ -230,9 +230,6 @@ Resources:
               report, report_unused = generate_report(workspaces, workspaces_unused)
               send_report_by_email(report, report_unused, UNUSED_DAYS)
               generate_report_csv(workspaces, workspaces_unused)
-
-
-      Description: Invoke a function during stack creation.
       TracingConfig:
         Mode: Active
 # SNS Topic
