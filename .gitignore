@@ -1,0 +1,42 @@
+# Compiled output (TypeScript -> JS emitted next to sources)
+bin/**/*.js
+bin/**/*.d.ts
+lib/**/*.js
+lib/**/*.d.ts
+src/**/*.js
+src/**/*.d.ts
+test/**/*.js
+test/**/*.d.ts
+*.tsbuildinfo
+
+# Dependencies
+node_modules
+
+# CDK
+.cdk.staging
+cdk.out
+
+# Test / coverage
+coverage/
+
+# Kiro
+.kiro/
+
+# IDE / editor
+.idea/
+.vscode/
+
+# draw.io auto-backup / temp files (keep the .drawio source tracked)
+*.drawio.bkp
+*.drawio.dtmp
+.$*.drawio.bkp
+.$*.drawio.dtmp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs / env
+*.log
+.env
+.env.*
