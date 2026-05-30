@@ -30,6 +30,17 @@ export interface ReportUnusedWorkspacesStackProps extends StackProps {
   readonly unusedDaysThreshold: number;
   /** How long to keep generated CSV reports in S3, in days. */
   readonly reportRetentionDays: number;
+  /**
+   * Optional JSON string overriding the estimated monthly price table used for
+   * the FinOps savings view, keyed by compute type, e.g.
+   * `{"STANDARD":{"alwaysOn":35,"autoStopBase":9.75}}`. Merged over defaults.
+   */
+  readonly pricesJson?: string;
+  /**
+   * When true, the handler resolves real list prices from the AWS Price List
+   * API (layered over any override / defaults). Adds pricing:GetProducts.
+   */
+  readonly usePricingApi?: boolean;
 }
 
 /**
@@ -145,6 +156,8 @@ export class ReportUnusedWorkspacesStack extends Stack {
         SNS_TOPIC_ARN: this.topic.topicArn,
         BUCKET_NAME: this.reportBucket.bucketName,
         NODE_OPTIONS: '--enable-source-maps',
+        ...(props.pricesJson ? { WORKSPACE_PRICES_JSON: props.pricesJson } : {}),
+        ...(props.usePricingApi ? { USE_PRICING_API: 'true' } : {}),
       },
       bundling: {
         minify: true,
@@ -187,6 +200,19 @@ export class ReportUnusedWorkspacesStack extends Stack {
         resources: ['*'],
       }),
     );
+
+    // Optional: allow reading the public AWS Price List for the FinOps savings
+    // view. pricing:GetProducts does not support resource-level permissions.
+    if (props.usePricingApi) {
+      this.handler.addToRolePolicy(
+        new iam.PolicyStatement({
+          sid: 'ReadPriceList',
+          effect: iam.Effect.ALLOW,
+          actions: ['pricing:GetProducts'],
+          resources: ['*'],
+        }),
+      );
+    }
 
     // -----------------------------------------------------------------------
     // EventBridge Scheduler -> Lambda (with a dead-letter queue)
@@ -318,7 +344,7 @@ export class ReportUnusedWorkspacesStack extends Stack {
         {
           id: 'AwsSolutions-IAM5',
           reason:
-            'workspaces:DescribeWorkspacesConnectionStatus and xray:Put* do not support resource-level permissions (Resource must be *); the kms:GenerateDataKey* action wildcard is the standard grantPublish pattern scoped to the topic CMK ARN; the reports/* object wildcard is required because each run writes a new dated report object. S3 and SNS are scoped to specific ARNs.',
+            'workspaces:DescribeWorkspacesConnectionStatus, pricing:GetProducts, and xray:Put* do not support resource-level permissions (Resource must be *); the kms:GenerateDataKey* action wildcard is the standard grantPublish pattern scoped to the topic CMK ARN; the reports/* object wildcard is required because each run writes a new dated report object. S3 and SNS are scoped to specific ARNs.',
           appliesTo: [
             'Resource::*',
             'Action::kms:GenerateDataKey*',

@@ -22,6 +22,7 @@ predeterminados validados con **cdk-nag**.
 - [Seguridad por defecto](#seguridad-por-defecto)
 - [Requisitos previos](#requisitos-previos)
 - [Configuración](#configuración)
+- [Vista FinOps](#vista-finops)
 - [Despliegue](#despliegue)
 - [Pruebas](#pruebas)
 - [Limpieza](#limpieza)
@@ -57,18 +58,23 @@ predeterminados validados con **cdk-nag**.
 3. Los workspaces se dividen en dos grupos: *sin uso durante ≥ el umbral de días*
    y *nunca conectados* (sin `LastKnownUserConnectionTimestamp`).
 4. Los workspaces marcados se enriquecen con `workspaces:DescribeWorkspaces`
-   añadiendo el usuario, el directorio, el bundle y el modo de ejecución (AlwaysOn
-   vs. AutoStop), de modo que el reporte sea accionable y resalte oportunidades de
-   ahorro.
-5. La función escribe un CSV con marca de tiempo en `s3://<bucket>/reports/` (los
+   añadiendo el usuario, el directorio, el bundle, el tipo de cómputo y el modo de
+   ejecución (AlwaysOn vs. AutoStop), de modo que el reporte sea accionable y
+   resalte oportunidades de ahorro.
+5. Una **vista FinOps** estima el costo de ejecución mensual de cada workspace
+   inactivo y el ahorro realizable al **terminarlo**, desglosado por modo de
+   ejecución. Los precios provienen de una tabla configurable o, de forma
+   opcional, en vivo desde la **AWS Price List API**. Consulta
+   [Vista FinOps](#vista-finops) para conocer el modelo de costos.
+6. La función escribe un CSV con marca de tiempo en `s3://<bucket>/reports/` (los
    valores se escapan según RFC 4180 y se protegen contra la inyección de fórmulas
    de hoja de cálculo) y publica un resumen legible en **SNS**.
-6. **SNS** entrega el reporte a la dirección de correo suscrita.
-7. Si una invocación programada falla tras los reintentos, el evento llega a una
+7. **SNS** entrega el reporte a la dirección de correo suscrita.
+8. Si una invocación programada falla tras los reintentos, el evento llega a una
    **cola de mensajes fallidos (DLQ) de SQS**, y las **alarmas de CloudWatch**
    publican en el mismo tema de SNS ante errores/throttling de Lambda o actividad
    en la DLQ.
-8. **CloudWatch Logs** y **X-Ray** capturan el detalle de la ejecución para el
+9. **CloudWatch Logs** y **X-Ray** capturan el detalle de la ejecución para el
    diagnóstico.
 
 ## Seguridad por defecto
@@ -88,6 +94,8 @@ de seguridad de AWS:
   - `workspaces:DescribeWorkspacesConnectionStatus` y
     `workspaces:DescribeWorkspaces` sobre `*` (estas API **no** admiten permisos a
     nivel de recurso).
+  - `pricing:GetProducts` sobre `*` (solo cuando la Price List API está habilitada;
+    esta API no admite permisos a nivel de recurso).
   - `s3:PutObject` solo sobre el prefijo `reports/*`.
   - `sns:Publish` solo sobre el ARN del tema creado.
 - **Resiliencia** — el destino de EventBridge Scheduler tiene una cola de mensajes
@@ -115,7 +123,11 @@ Define los valores en `cdk.json` dentro de `context.reportUnusedWorkspaces`:
     "emailAddress": "tu@ejemplo.com",
     "executionRateDays": 7,
     "unusedDaysThreshold": 30,
-    "reportRetentionDays": 365
+    "reportRetentionDays": 365,
+    "usePricingApi": false,
+    "prices": {
+      "STANDARD": { "alwaysOn": 35, "autoStopBase": 9.75 }
+    }
   }
 }
 ```
@@ -126,6 +138,8 @@ Define los valores en `cdk.json` dentro de `context.reportUnusedWorkspaces`:
 | `executionRateDays` | Frecuencia de ejecución del reporte, en días | `7` | `3`–`30` |
 | `unusedDaysThreshold` | Umbral de inactividad para marcar un workspace | `30` | `7`–`90` |
 | `reportRetentionDays` | Tiempo de conservación de los CSV en S3 | `365` | ≥ `1` |
+| `usePricingApi` | Resuelve precios de lista en vivo desde la AWS Price List API (agrega `pricing:GetProducts`) | `false` | booleano |
+| `prices` | Sobrescrituras de precio mensual por tipo de cómputo para la vista FinOps | estimaciones integradas | objeto |
 
 Como alternativa, proporciona el correo con la variable de entorno `REPORT_EMAIL`
 y sobrescribe los valores por defecto con `--context`:
@@ -135,6 +149,44 @@ REPORT_EMAIL=tu@ejemplo.com npx cdk deploy \
   -c reportUnusedWorkspaces.executionRateDays=7 \
   -c reportUnusedWorkspaces.unusedDaysThreshold=30
 ```
+
+### Variables de entorno (Lambda)
+
+Normalmente la aplicación CDK las define por ti, pero también pueden suministrarse
+directamente:
+
+| Variable | Descripción |
+| --- | --- |
+| `USE_PRICING_API` | Cuando es `true`, obtiene los precios de lista de WorkSpaces en vivo mediante la Price List API. |
+| `WORKSPACE_PRICES_JSON` | Tabla de precios en JSON que se fusiona sobre los valores predeterminados integrados, p. ej. `{"STANDARD":{"alwaysOn":35,"autoStopBase":9.75}}`. |
+| `PRICING_REGION_CODE` | Región cuyos precios se obtienen (por defecto, la Región de la función). |
+
+## Vista FinOps
+
+El reporte incluye una vista de costos para ayudar a dimensionar la oportunidad de
+ahorro. Traza una línea deliberada entre dos cifras diferentes:
+
+- **Costo de ejecución actual** — lo que los workspaces inactivos están costando
+  *ahora*. Un workspace `ALWAYS_ON` inactivo factura su tarifa mensual fija
+  completa; un workspace `AUTO_STOP` inactivo ya factura cerca de su tarifa base
+  mensual fija, por lo que se modela como esa base (no como uso completo).
+- **Ahorro realizable al terminar** — lo que deja de facturarse si el workspace se
+  **termina**, que es la única palanca sobre la que actúa este reporte. Se desglosa
+  por modo de ejecución, y **los workspaces `ALWAYS_ON` inactivos se marcan como la
+  prioridad** (el ahorro más grande y certero, y una probable brecha de cobertura).
+
+> [!NOTE]
+> Este reporte **no** cambia los modos de facturación. Convertir entre `ALWAYS_ON`
+> y `AUTO_STOP` según el uso real es tarea de
+> [Cost Optimizer for Amazon WorkSpaces](https://docs.aws.amazon.com/solutions/latest/cost-optimizer-for-workspaces/overview.html)
+> (WCO); ambos son complementarios.
+
+Las cifras son **estimaciones a precio de lista**. Para montos autorizados
+(incluidos descuentos EDP/PPA y el uso real por hora de `AUTO_STOP`), usa **AWS
+Cost Explorer**. Los precios se resuelven en capas, de la más autorizada a la
+menos: Price List API (si está habilitada) → sobrescritura de
+`prices`/`WORKSPACE_PRICES_JSON` → valores predeterminados integrados. Los fallos
+de precios nunca interrumpen una ejecución; el reporte recurre a la siguiente capa.
 
 ## Despliegue
 
@@ -192,8 +244,10 @@ tu cuenta.
 ├── bin/app.ts                          # Punto de entrada de la app CDK
 ├── lib/report-unused-workspaces-stack.ts
 ├── src/handler/index.ts                # Lambda (Node.js 24, AWS SDK v3)
+├── src/handler/pricing.ts              # Integración con AWS Price List API (FinOps)
 ├── test/report-unused-workspaces-stack.test.ts  # Pruebas de aserción de CDK
 ├── test/handler.test.ts                # Pruebas unitarias de la Lambda
+├── test/pricing.test.ts                # Pruebas unitarias de la Price List API
 ├── cdk.json
 └── package.json
 ```
@@ -204,8 +258,12 @@ Lanzado recientemente:
 
 - ✅ **Endurecimiento operativo** — DLQ de Lambda en el destino del programador,
   más alarmas de CloudWatch de error/throttling/DLQ.
-- ✅ **Reportes más ricos** — enriquecidos con usuario, directorio, bundle y modo
-  de ejecución AlwaysOn vs. AutoStop para dar contexto de ahorro de costos.
+- ✅ **Reportes más ricos** — enriquecidos con usuario, directorio, bundle, tipo de
+  cómputo y modo de ejecución AlwaysOn vs. AutoStop para dar contexto de ahorro de
+  costos.
+- ✅ **Vista FinOps** — estima el costo de ejecución de los workspaces inactivos y
+  el ahorro realizable al terminarlos, desglosado por modo de ejecución, con
+  precios en vivo opcionales desde la AWS Price List API.
 - ✅ **CI** — GitHub Actions que ejecuta lint, pruebas, synth y cdk-nag, con
   Dependabot manteniendo al día el AWS SDK y CDK.
 
@@ -213,10 +271,15 @@ Ideas para llevar la solución aún más lejos:
 
 - Cobertura **multicuenta / multirregión** mediante CloudFormation StackSets o
   personalizaciones de Control Tower, consolidando los resultados de forma central.
+- **Showback por etiqueta** — agrupa el desperdicio por propietario/equipo/centro
+  de costos y, de forma opcional, envía correos por propietario.
+- **Métricas de tendencia** — emite una métrica personalizada de CloudWatch (p. ej.
+  el desperdicio mensual estimado) para paneles y alarmas a lo largo del tiempo.
 - **Auto-remediación** con un flujo opcional de Step Functions (reporte →
-  aprobación humana → redimensionar, cambiar a facturación AutoStop o terminar).
-- **Análisis de costos** que enriquece el reporte con precios de bundles para
-  mostrar el ahorro mensual estimado en dólares.
+  aprobación humana → terminar), manteniendo la terminación estrictamente con
+  intervención humana.
+- **Reconciliación de valores reales** mediante Cost Explorer / CUR para comparar
+  las estimaciones a precio de lista con el gasto real.
 - **Modo data lake** que escribe Parquet particionado por fecha para
   Athena/QuickSight.
 - **Destinos conectables** (SES en HTML, Slack, Teams, bus de EventBridge).
