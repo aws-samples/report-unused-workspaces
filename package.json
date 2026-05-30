@@ -23,9 +23,9 @@
   },
   "devDependencies": {
     "@aws-sdk/client-pricing": "^3.1057.0",
-    "@aws-sdk/client-s3": "^3.658.1",
-    "@aws-sdk/client-sns": "^3.658.1",
-    "@aws-sdk/client-workspaces": "^3.658.1",
+    "@aws-sdk/client-s3": "^3.1057.0",
+    "@aws-sdk/client-sns": "^3.1057.0",
+    "@aws-sdk/client-workspaces": "^3.1057.0",
     "@eslint/js": "^9.39.4",
     "@types/aws-lambda": "^8.10.145",
     "@types/jest": "^29.5.13",
