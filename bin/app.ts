@@ -10,6 +10,8 @@ interface AppContext {
   executionRateDays: number;
   unusedDaysThreshold: number;
   reportRetentionDays: number;
+  prices?: Record<string, { alwaysOn: number; autoStopBase: number }>;
+  usePricingApi?: boolean;
 }
 
 const app = new cdk.App();
@@ -24,6 +26,12 @@ const emailAddress =
 const executionRateDays = Number(ctx.executionRateDays ?? 7);
 const unusedDaysThreshold = Number(ctx.unusedDaysThreshold ?? 30);
 const reportRetentionDays = Number(ctx.reportRetentionDays ?? 365);
+// Optional FinOps price-table override (context object or env JSON string).
+const pricesJson = ctx.prices
+  ? JSON.stringify(ctx.prices)
+  : process.env.WORKSPACE_PRICES_JSON;
+// Opt-in to live AWS Price List lookups (context flag or env var).
+const usePricingApi = ctx.usePricingApi === true || process.env.USE_PRICING_API === 'true';
 
 if (!emailAddress) {
   throw new Error(
@@ -54,6 +62,8 @@ new ReportUnusedWorkspacesStack(app, 'ReportUnusedWorkspacesStack', {
   executionRateDays,
   unusedDaysThreshold,
   reportRetentionDays,
+  pricesJson,
+  usePricingApi,
 });
 
 Aspects.of(app).add(new AwsSolutionsChecks({ verbose: true }));

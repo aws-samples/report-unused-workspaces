@@ -22,6 +22,7 @@ queue, and security defaults validated by **cdk-nag**.
 - [Security defaults](#security-defaults)
 - [Prerequisites](#prerequisites)
 - [Configuration](#configuration)
+- [FinOps view](#finops-view)
 - [Deploy](#deploy)
 - [Testing](#testing)
 - [Cleanup](#cleanup)
@@ -56,16 +57,20 @@ queue, and security defaults validated by **cdk-nag**.
 3. Workspaces are split into two buckets: *unused for ≥ threshold days* and
    *never connected* (no `LastKnownUserConnectionTimestamp`).
 4. Flagged workspaces are enriched via `workspaces:DescribeWorkspaces` with the
-   user name, directory, bundle, and running mode (AlwaysOn vs AutoStop) so the
-   report is actionable and highlights cost-saving opportunities.
-5. The function writes a timestamped CSV to `s3://<bucket>/reports/` (values are
+   user name, directory, bundle, compute type, and running mode (AlwaysOn vs
+   AutoStop) so the report is actionable and highlights cost-saving opportunities.
+5. A **FinOps view** estimates each idle workspace's monthly run-rate and the
+   saving realizable by **terminating** it, broken down by running mode. Prices
+   come from a configurable table or, optionally, live from the **AWS Price List
+   API**. See [FinOps view](#finops-view) for the cost model.
+6. The function writes a timestamped CSV to `s3://<bucket>/reports/` (values are
    escaped per RFC 4180 and guarded against spreadsheet formula injection) and
    publishes a human-readable summary to **SNS**.
-6. **SNS** delivers the report to the subscribed email address.
-7. If a scheduled invocation fails after retries, the event lands in an **SQS
+7. **SNS** delivers the report to the subscribed email address.
+8. If a scheduled invocation fails after retries, the event lands in an **SQS
    dead-letter queue**, and **CloudWatch Alarms** publish to the same SNS topic on
    Lambda errors/throttles or DLQ activity.
-8. **CloudWatch Logs** and **X-Ray** capture execution detail for troubleshooting.
+9. **CloudWatch Logs** and **X-Ray** capture execution detail for troubleshooting.
 
 ## Security defaults
 
@@ -82,6 +87,8 @@ This solution is designed around least privilege and AWS security best practices
   - `workspaces:DescribeWorkspacesConnectionStatus` and
     `workspaces:DescribeWorkspaces` on `*` (these APIs do **not** support
     resource-level permissions).
+  - `pricing:GetProducts` on `*` (only when the Price List API is enabled; this
+    API does not support resource-level permissions).
   - `s3:PutObject` only on the `reports/*` prefix.
   - `sns:Publish` only on the created topic ARN.
 - **Resilience** — the EventBridge Scheduler target has an SQS dead-letter queue
@@ -108,7 +115,11 @@ Set values in `cdk.json` under `context.reportUnusedWorkspaces`:
     "emailAddress": "you@example.com",
     "executionRateDays": 7,
     "unusedDaysThreshold": 30,
-    "reportRetentionDays": 365
+    "reportRetentionDays": 365,
+    "usePricingApi": false,
+    "prices": {
+      "STANDARD": { "alwaysOn": 35, "autoStopBase": 9.75 }
+    }
   }
 }
 ```
@@ -119,6 +130,8 @@ Set values in `cdk.json` under `context.reportUnusedWorkspaces`:
 | `executionRateDays` | How often the report runs, in days | `7` | `3`–`30` |
 | `unusedDaysThreshold` | Inactivity threshold to flag a workspace | `30` | `7`–`90` |
 | `reportRetentionDays` | How long CSV reports are kept in S3 | `365` | ≥ `1` |
+| `usePricingApi` | Resolve live list prices from the AWS Price List API (adds `pricing:GetProducts`) | `false` | boolean |
+| `prices` | Per-compute-type monthly price overrides for the FinOps view | built-in estimates | object |
 
 Alternatively, provide the email via the `REPORT_EMAIL` environment variable and
 override defaults with `--context`:
@@ -128,6 +141,42 @@ REPORT_EMAIL=you@example.com npx cdk deploy \
   -c reportUnusedWorkspaces.executionRateDays=7 \
   -c reportUnusedWorkspaces.unusedDaysThreshold=30
 ```
+
+### Environment variables (Lambda)
+
+These are normally set for you by the CDK app, but can be supplied directly:
+
+| Variable | Description |
+| --- | --- |
+| `USE_PRICING_API` | When `true`, fetch live WorkSpaces list prices via the Price List API. |
+| `WORKSPACE_PRICES_JSON` | JSON price table merged over the built-in defaults, e.g. `{"STANDARD":{"alwaysOn":35,"autoStopBase":9.75}}`. |
+| `PRICING_REGION_CODE` | Region whose prices to fetch (defaults to the function's Region). |
+
+## FinOps view
+
+The report includes a cost view to help size the savings opportunity. It draws a
+deliberate line between two different numbers:
+
+- **Current run-rate** — what idle workspaces are costing *now*. An idle
+  `ALWAYS_ON` workspace bills its full flat monthly fee; an idle `AUTO_STOP`
+  workspace already bills close to its fixed monthly base fee, so it is modeled
+  as that base (not full usage).
+- **Realizable saving by termination** — what stops being billed if the
+  workspace is **terminated**, which is the only lever this report acts on. It is
+  broken down by running mode, and **idle `ALWAYS_ON` workspaces are flagged as
+  the priority** (largest, most certain saving, and a likely coverage gap).
+
+> [!NOTE]
+> This report does **not** switch billing modes. Converting between `ALWAYS_ON`
+> and `AUTO_STOP` based on real usage is the job of
+> [Cost Optimizer for Amazon WorkSpaces](https://docs.aws.amazon.com/solutions/latest/cost-optimizer-for-workspaces/overview.html)
+> (WCO); the two are complementary.
+
+Figures are **list-price estimates**. For authoritative amounts (including EDP/PPA
+discounts and real `AUTO_STOP` hourly usage), use **AWS Cost Explorer**. Prices
+resolve in layers, most authoritative first: Price List API (if enabled) →
+`prices`/`WORKSPACE_PRICES_JSON` override → built-in defaults. Pricing failures
+never break a run; the report falls back to the next layer.
 
 ## Deploy
 
@@ -184,8 +233,10 @@ negligible, but you remain responsible for charges in your account.
 ├── bin/app.ts                          # CDK app entrypoint
 ├── lib/report-unused-workspaces-stack.ts
 ├── src/handler/index.ts                # Lambda (Node.js 24, AWS SDK v3)
+├── src/handler/pricing.ts              # AWS Price List API integration (FinOps)
 ├── test/report-unused-workspaces-stack.test.ts  # CDK assertion tests
 ├── test/handler.test.ts                # Lambda unit tests
+├── test/pricing.test.ts                # Pricing API unit tests
 ├── cdk.json
 └── package.json
 ```
@@ -196,8 +247,11 @@ Recently shipped:
 
 - ✅ **Operational hardening** — Lambda DLQ on the scheduler target plus
   CloudWatch error/throttle/DLQ alarms.
-- ✅ **Richer reports** — enriched with user, directory, bundle, and AlwaysOn vs
-  AutoStop running mode for cost-saving context.
+- ✅ **Richer reports** — enriched with user, directory, bundle, compute type, and
+  AlwaysOn vs AutoStop running mode for cost-saving context.
+- ✅ **FinOps view** — estimates idle run-rate and the saving realizable by
+  termination, broken down by running mode, with optional live pricing from the
+  AWS Price List API.
 - ✅ **CI** — GitHub Actions running lint, tests, synth and cdk-nag, with
   Dependabot keeping the AWS SDK and CDK current.
 
@@ -205,10 +259,14 @@ Ideas to take the solution even further:
 
 - **Multi-account / multi-region** coverage via CloudFormation StackSets or
   Control Tower customizations, consolidating results centrally.
+- **Showback by tag** — group waste by owner/team/cost-center and optionally send
+  per-owner emails.
+- **Trend metrics** — emit a custom CloudWatch metric (e.g. estimated monthly
+  waste) for dashboards and alarms over time.
 - **Auto-remediation** with an opt-in Step Functions workflow (report → human
-  approval → resize, switch to AutoStop billing, or terminate).
-- **Cost framing** that enriches the report with bundle pricing to show projected
-  monthly savings in dollars.
+  approval → terminate), keeping termination strictly human-in-the-loop.
+- **Actuals reconciliation** via Cost Explorer / CUR to compare list-price
+  estimates against real spend.
 - **Data lake mode** writing Parquet partitioned by date for Athena/QuickSight.
 - **Pluggable destinations** (SES HTML, Slack, Teams, EventBridge bus).
 - **CD** with OIDC-based deploys and security scans.

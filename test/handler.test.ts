@@ -11,7 +11,13 @@ import {
   classify,
   collectUnusedWorkspaces,
   csvEscape,
+  estimateMonthlyCost,
   formatDate,
+  formatUsd,
+  loadPrices,
+  summarizeSavings,
+  DEFAULT_PRICES,
+  type PriceTable,
   type UnusedReport,
 } from '../src/handler/index';
 
@@ -79,16 +85,20 @@ describe('buildCsv', () => {
           userName: 'bob',
           directoryId: 'd-1',
           bundleId: 'b-1',
+          computeType: 'STANDARD',
           runningMode: RunningMode.ALWAYS_ON,
+          estimatedMonthlyCostUsd: 35,
         },
       ],
       unknown: [{ workspaceId: 'ws-3', daysUnused: null, userName: 'carol' }],
     };
     const csv = buildCsv(report);
     const lines = csv.split('\r\n');
-    expect(lines[0]).toBe('WorkspaceId,UserName,DirectoryId,BundleId,RunningMode,DaysUnused');
-    expect(lines[1]).toBe('ws-2,bob,d-1,b-1,ALWAYS_ON,40');
-    expect(lines[2]).toBe('ws-3,carol,,,,not used');
+    expect(lines[0]).toBe(
+      'WorkspaceId,UserName,DirectoryId,BundleId,ComputeType,RunningMode,DaysUnused,EstMonthlyRunRateUSD',
+    );
+    expect(lines[1]).toBe('ws-2,bob,d-1,b-1,STANDARD,ALWAYS_ON,40,35.00');
+    expect(lines[2]).toBe('ws-3,carol,,,,,not used,');
     expect(csv.endsWith('\r\n')).toBe(true);
   });
 });
@@ -97,15 +107,56 @@ describe('buildMessage', () => {
   test('summarizes unused, unknown, and AlwaysOn cost framing', () => {
     const report: UnusedReport = {
       unused: [
-        { workspaceId: 'ws-2', daysUnused: 40, userName: 'bob', runningMode: RunningMode.ALWAYS_ON },
+        {
+          workspaceId: 'ws-2',
+          daysUnused: 40,
+          userName: 'bob',
+          computeType: 'STANDARD',
+          runningMode: RunningMode.ALWAYS_ON,
+          estimatedMonthlyCostUsd: 35,
+        },
       ],
       unknown: [{ workspaceId: 'ws-3', daysUnused: null }],
     };
     const msg = buildMessage(report, 30);
     expect(msg).toContain('Idle for 30+ days');
     expect(msg).toContain('ws-2');
-    expect(msg).toContain('ALWAYS_ON billing mode');
+    expect(msg).toContain('ALWAYS_ON idle');
     expect(msg).toContain('NEVER CONNECTED');
+  });
+
+  test('renders the FinOps view with run-rate and per-mode breakdown', () => {
+    const report: UnusedReport = {
+      unused: [
+        {
+          workspaceId: 'ws-1',
+          daysUnused: 40,
+          computeType: 'STANDARD',
+          runningMode: RunningMode.ALWAYS_ON,
+          estimatedMonthlyCostUsd: 35,
+        },
+      ],
+      unknown: [
+        {
+          workspaceId: 'ws-2',
+          daysUnused: null,
+          computeType: 'POWER',
+          runningMode: RunningMode.AUTO_STOP,
+          estimatedMonthlyCostUsd: 19,
+        },
+      ],
+    };
+    const msg = buildMessage(report, 30);
+    expect(msg).toContain('FINOPS VIEW');
+    // 35 + 19 = 54 monthly run-rate, * 12 = 648 annual.
+    expect(msg).toContain('$54.00');
+    expect(msg).toContain('$648.00');
+    // Per-mode breakdown surfaces ALWAYS_ON as the priority.
+    expect(msg).toContain('ALWAYS_ON idle (1)');
+    expect(msg).toContain('AUTO_STOP idle (1)');
+    expect(msg).toContain('priority');
+    // Positions the report relative to WCO for mode switching.
+    expect(msg).toContain('Cost Optimizer for Amazon WorkSpaces');
   });
 
   test('states when there is nothing to report in a bucket', () => {
@@ -113,6 +164,102 @@ describe('buildMessage', () => {
     const msg = buildMessage(report, 14);
     expect(msg).toContain('no unused workspaces in the last 14 days');
     expect(msg).toContain('No WorkSpaces with unknown last usage');
+  });
+});
+
+describe('estimateMonthlyCost', () => {
+  test('uses the AlwaysOn flat rate for ALWAYS_ON workspaces', () => {
+    expect(estimateMonthlyCost('STANDARD', RunningMode.ALWAYS_ON, DEFAULT_PRICES)).toBe(
+      DEFAULT_PRICES.STANDARD.alwaysOn,
+    );
+  });
+
+  test('uses the AutoStop base fee for AUTO_STOP workspaces', () => {
+    expect(estimateMonthlyCost('STANDARD', RunningMode.AUTO_STOP, DEFAULT_PRICES)).toBe(
+      DEFAULT_PRICES.STANDARD.autoStopBase,
+    );
+  });
+
+  test('is case-insensitive on the compute type', () => {
+    expect(estimateMonthlyCost('power', RunningMode.ALWAYS_ON, DEFAULT_PRICES)).toBe(
+      DEFAULT_PRICES.POWER.alwaysOn,
+    );
+  });
+
+  test('returns undefined for unknown or missing compute types', () => {
+    expect(estimateMonthlyCost('MARS', RunningMode.ALWAYS_ON, DEFAULT_PRICES)).toBeUndefined();
+    expect(estimateMonthlyCost(undefined, RunningMode.ALWAYS_ON, DEFAULT_PRICES)).toBeUndefined();
+  });
+});
+
+describe('summarizeSavings', () => {
+  test('sums priced workspaces, counts unpriced, and breaks down by mode', () => {
+    const report: UnusedReport = {
+      unused: [
+        {
+          workspaceId: 'ws-1',
+          daysUnused: 40,
+          runningMode: RunningMode.ALWAYS_ON,
+          estimatedMonthlyCostUsd: 35,
+        },
+        { workspaceId: 'ws-2', daysUnused: 50 }, // unpriced
+      ],
+      unknown: [
+        {
+          workspaceId: 'ws-3',
+          daysUnused: null,
+          runningMode: RunningMode.AUTO_STOP,
+          estimatedMonthlyCostUsd: 21,
+        },
+      ],
+    };
+    const s = summarizeSavings(report);
+    expect(s.totalMonthlyUsd).toBe(56);
+    expect(s.totalAnnualUsd).toBe(672);
+    expect(s.pricedCount).toBe(2);
+    expect(s.unpricedCount).toBe(1);
+    expect(s.alwaysOnMonthlyUsd).toBe(35);
+    expect(s.alwaysOnCount).toBe(1);
+    expect(s.autoStopMonthlyUsd).toBe(21);
+    expect(s.autoStopCount).toBe(1);
+  });
+
+  test('returns zeros when nothing is priced', () => {
+    const s = summarizeSavings({ unused: [], unknown: [] });
+    expect(s).toEqual({
+      totalMonthlyUsd: 0,
+      totalAnnualUsd: 0,
+      pricedCount: 0,
+      unpricedCount: 0,
+      alwaysOnMonthlyUsd: 0,
+      alwaysOnCount: 0,
+      autoStopMonthlyUsd: 0,
+      autoStopCount: 0,
+    });
+  });
+});
+
+describe('loadPrices', () => {
+  test('returns defaults when no override is provided', () => {
+    expect(loadPrices(undefined)).toBe(DEFAULT_PRICES);
+  });
+
+  test('merges a valid override over defaults (keys upper-cased)', () => {
+    const table: PriceTable = loadPrices('{"standard":{"alwaysOn":99,"autoStopBase":10}}');
+    expect(table.STANDARD).toEqual({ alwaysOn: 99, autoStopBase: 10 });
+    // Untouched defaults remain.
+    expect(table.POWER).toEqual(DEFAULT_PRICES.POWER);
+  });
+
+  test('falls back to defaults on invalid JSON', () => {
+    expect(loadPrices('{not json')).toBe(DEFAULT_PRICES);
+  });
+});
+
+describe('formatUsd', () => {
+  test('formats with thousands separators and two decimals', () => {
+    expect(formatUsd(1356)).toBe('$1,356.00');
+    expect(formatUsd(7.25)).toBe('$7.25');
   });
 });
 
@@ -149,7 +296,10 @@ describe('collectUnusedWorkspaces', () => {
           UserName: 'alice',
           DirectoryId: 'd-1',
           BundleId: 'b-1',
-          WorkspaceProperties: { RunningMode: RunningMode.ALWAYS_ON },
+          WorkspaceProperties: {
+            RunningMode: RunningMode.ALWAYS_ON,
+            ComputeTypeName: 'STANDARD',
+          },
         },
         { WorkspaceId: 'ws-never', UserName: 'dave', DirectoryId: 'd-1', BundleId: 'b-2' },
       ],
@@ -160,6 +310,8 @@ describe('collectUnusedWorkspaces', () => {
     expect(report.unused.map((r) => r.workspaceId)).toEqual(['ws-old']);
     expect(report.unused[0].userName).toBe('alice');
     expect(report.unused[0].runningMode).toBe(RunningMode.ALWAYS_ON);
+    expect(report.unused[0].computeType).toBe('STANDARD');
+    expect(report.unused[0].estimatedMonthlyCostUsd).toBe(DEFAULT_PRICES.STANDARD.alwaysOn);
     expect(report.unknown.map((r) => r.workspaceId)).toEqual(['ws-never']);
     expect(report.unknown[0].userName).toBe('dave');
 

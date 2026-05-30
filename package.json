@@ -1,6 +1,6 @@
 {
   "name": "report-unused-workspaces",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "CDK app that detects and reports unused Amazon WorkSpaces.",
   "private": true,
   "bin": {
@@ -22,6 +22,7 @@
     "node": ">=20.0.0"
   },
   "devDependencies": {
+    "@aws-sdk/client-pricing": "^3.1057.0",
     "@aws-sdk/client-s3": "^3.658.1",
     "@aws-sdk/client-sns": "^3.658.1",
     "@aws-sdk/client-workspaces": "^3.658.1",
